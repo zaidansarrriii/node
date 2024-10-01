@@ -505,7 +505,6 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
   V(FatalErrorCallback, exception_behavior, nullptr)                          \
   V(OOMErrorCallback, oom_behavior, nullptr)                                  \
   V(LogEventCallback, event_logger, nullptr)                                  \
-  V(AllowCodeGenerationFromStringsCallback, allow_code_gen_callback, nullptr) \
   V(ModifyCodeGenerationFromStringsCallback2, modify_code_gen_callback,       \
     nullptr)                                                                  \
   V(AllowWasmCodeGenerationCallback, allow_wasm_code_gen_callback, nullptr)   \
@@ -646,7 +645,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   // for legacy API reasons.
   static void Delete(Isolate* isolate);
 
-  void SetUpFromReadOnlyArtifacts(std::shared_ptr<ReadOnlyArtifacts> artifacts,
+  void SetUpFromReadOnlyArtifacts(ReadOnlyArtifacts* artifacts,
                                   ReadOnlyHeap* ro_heap);
   void set_read_only_heap(ReadOnlyHeap* ro_heap) { read_only_heap_ = ro_heap; }
 
@@ -757,7 +756,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   }
 
   ReadOnlyArtifacts* read_only_artifacts() const {
-    ReadOnlyArtifacts* artifacts = artifacts_.get();
+    ReadOnlyArtifacts* artifacts = isolate_group()->read_only_artifacts();
     DCHECK_IMPLIES(ReadOnlyHeap::IsReadOnlySpaceShared(), artifacts != nullptr);
     return artifacts;
   }
@@ -816,7 +815,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   bool IsSharedArrayBufferConstructorEnabled(Handle<NativeContext> context);
 
   bool IsWasmStringRefEnabled(Handle<NativeContext> context);
-  bool IsWasmInliningEnabled(DirectHandle<NativeContext> context);
   bool IsWasmImportedStringsEnabled(Handle<NativeContext> context);
   // Has the JSPI flag been requested?
   // Used only during initialization of contexts.
@@ -983,12 +981,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   V8_NOINLINE void PushParamsAndContinue(
       void* ptr1 = nullptr, void* ptr2 = nullptr, void* ptr3 = nullptr,
       void* ptr4 = nullptr, void* ptr5 = nullptr, void* ptr6 = nullptr);
-  Handle<FixedArray> CaptureDetailedStackTrace(
+  Handle<StackTraceInfo> CaptureDetailedStackTrace(
       int limit, StackTrace::StackTraceOptions options);
   MaybeHandle<JSObject> CaptureAndSetErrorStack(Handle<JSObject> error_object,
                                                 FrameSkipMode mode,
                                                 Handle<Object> caller);
-  Handle<FixedArray> GetDetailedStackTrace(Handle<JSReceiver> error_object);
+  Handle<StackTraceInfo> GetDetailedStackTrace(Handle<JSReceiver> error_object);
   Handle<FixedArray> GetSimpleStackTrace(Handle<JSReceiver> error_object);
   // Walks the JS stack to find the first frame with a script name or
   // source URL. The inspected frames are the same as for the detailed stack
@@ -1036,6 +1034,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   void OnPromiseThen(DirectHandle<JSPromise> promise);
   void OnPromiseBefore(Handle<JSPromise> promise);
   void OnPromiseAfter(Handle<JSPromise> promise);
+  void OnStackTraceCaptured(Handle<StackTraceInfo> stack_trace);
   void OnTerminationDuringRunMicrotasks();
 
   // Re-throw an exception.  This involves no error reporting since error
@@ -1260,9 +1259,23 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   }
 
   Address* builtin_entry_table() { return isolate_data_.builtin_entry_table(); }
+
 #ifdef V8_ENABLE_LEAPTIERING
-  V8_INLINE JSDispatchHandle* builtin_dispatch_table() {
-    return isolate_data_.builtin_dispatch_table();
+  // Predicting the handles using `GetStaticHandleForReadOnlySegmentEntry` is
+  // only possible if we have just one sole read only heap. In case we extend
+  // support to other build configurations we need a table of dispatch entries
+  // per isolate. See https://crrev.com/c/5783686 on how to do that.
+  static constexpr bool kBuiltinDispatchHandlesAreStatic =
+      ReadOnlyHeap::IsReadOnlySpaceShared();
+
+  static V8_INLINE JSDispatchHandle
+  builtin_dispatch_handle(JSBuiltinDispatchHandleRoot::Idx idx) {
+    static_assert(kBuiltinDispatchHandlesAreStatic);
+    return JSDispatchTable::GetStaticHandleForReadOnlySegmentEntry(idx);
+  }
+  V8_INLINE JSDispatchHandle builtin_dispatch_handle(Builtin builtin) {
+    return builtin_dispatch_handle(
+        JSBuiltinDispatchHandleRoot::to_idx(builtin));
   }
 #endif
   V8_INLINE Address* builtin_table() { return isolate_data_.builtin_table(); }
@@ -1360,6 +1373,9 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   }
   wasm::WasmOrphanedGlobalHandle* NewWasmOrphanedGlobalHandle();
   wasm::StackPool& stack_pool() { return stack_pool_; }
+  Builtins::WasmBuiltinHandleArray& wasm_builtin_code_handles() {
+    return wasm_builtin_code_handles_;
+  }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   GlobalHandles* global_handles() const { return global_handles_; }
@@ -1993,7 +2009,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     if (V8_UNLIKELY(v8_flags.efficiency_mode.value().has_value())) {
       return *v8_flags.efficiency_mode.value();
     }
-    return is_backgrounded();
+    return priority_ != v8::Isolate::Priority::kUserBlocking;
   }
 
   // This is a temporary api until we use it by default.
@@ -2128,6 +2144,23 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   Address trusted_pointer_table_base_address() const {
     return isolate_data_.trusted_pointer_table_.base_address();
+  }
+
+  TrustedPointerTable& shared_trusted_pointer_table() {
+    return *isolate_data_.shared_trusted_pointer_table_;
+  }
+
+  const TrustedPointerTable& shared_trusted_pointer_table() const {
+    return *isolate_data_.shared_trusted_pointer_table_;
+  }
+
+  TrustedPointerTable::Space* shared_trusted_pointer_space() {
+    return shared_trusted_pointer_space_;
+  }
+
+  Address shared_trusted_pointer_table_base_address() {
+    return reinterpret_cast<Address>(
+        &isolate_data_.shared_trusted_pointer_table_);
   }
 #endif  // V8_ENABLE_SANDBOX
 
@@ -2326,8 +2359,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
     EntryStackItem* previous_item;
   };
 
-  static Isolate* process_wide_shared_space_isolate_;
-
   void Deinit();
 
   static void SetIsolateThreadLocals(Isolate* isolate,
@@ -2387,7 +2418,6 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   IsolateGroup* isolate_group_;
   Heap heap_;
   ReadOnlyHeap* read_only_heap_ = nullptr;
-  std::shared_ptr<ReadOnlyArtifacts> artifacts_;
 
   // These are guaranteed empty when !OwnsStringTables().
   std::unique_ptr<StringTable> string_table_;
@@ -2663,7 +2693,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 
   debug::AsyncEventDelegate* async_event_delegate_ = nullptr;
   uint32_t promise_hook_flags_ = 0;
-  int async_task_count_ = 0;
+  uint32_t current_async_task_id_ = 0;
 
   std::unique_ptr<LocalIsolate> main_thread_local_isolate_;
 
@@ -2709,6 +2739,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
   ExternalPointerTable::Space* shared_external_pointer_space_ = nullptr;
 #endif  // V8_COMPRESS_POINTERS
 
+#ifdef V8_ENABLE_SANDBOX
+  // Stores the trusted pointer table space for the shared trusted pointer
+  // table.
+  TrustedPointerTable::Space* shared_trusted_pointer_space_ = nullptr;
+#endif  // V8_ENABLE_SANDBOX
+
   // List to manage the lifetime of the WaiterQueueNodes used to track async
   // waiters for JSSynchronizationPrimitives.
   std::list<std::unique_ptr<detail::WaiterQueueNode>> async_waiter_queue_nodes_;
@@ -2736,6 +2772,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
 #endif  // V8_ENABLE_DRUMBRAKE
   wasm::WasmOrphanedGlobalHandle* wasm_orphaned_handle_ = nullptr;
   wasm::StackPool stack_pool_;
+  Builtins::WasmBuiltinHandleArray wasm_builtin_code_handles_;
 #endif
 
   // Enables the host application to provide a mechanism for recording a

@@ -361,9 +361,6 @@ BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2, is_sparkplug_compiling,
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2, maglev_compilation_failed,
                     SharedFunctionInfo::MaglevCompilationFailedBit)
 
-BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2, sparkplug_compiled,
-                    SharedFunctionInfo::SparkplugCompiledBit)
-
 BIT_FIELD_ACCESSORS(SharedFunctionInfo, flags2,
                     function_context_independent_compiled,
                     SharedFunctionInfo::FunctionContextIndependentCompiledBit)
@@ -940,6 +937,13 @@ DEF_GETTER(SharedFunctionInfo, wasm_resume_data, Tagged<WasmResumeData>) {
   return Cast<WasmResumeData>(GetUntrustedData());
 }
 
+bool SharedFunctionInfo::is_promising_wasm_export() const {
+  Tagged<WasmExportedFunctionData> function_data =
+      wasm_exported_function_data();
+  return WasmFunctionData::PromiseField::decode(
+             function_data->js_promise_flags()) == wasm::kPromise;
+}
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 bool SharedFunctionInfo::HasBuiltinId() const {
@@ -1043,7 +1047,8 @@ void SharedFunctionInfo::ClearPreparseData(IsolateForSandbox isolate) {
                                ClearRecordedSlots::kYes);
 
   // Swap the map.
-  data->set_map(GetReadOnlyRoots().uncompiled_data_without_preparse_data_map(),
+  data->set_map(heap->isolate(),
+                GetReadOnlyRoots().uncompiled_data_without_preparse_data_map(),
                 kReleaseStore);
 
   // Ensure that the clear was successful.

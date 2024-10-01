@@ -30,6 +30,7 @@
 #include "src/handles/global-handles.h"
 #include "src/heap/combined-heap.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/init/bootstrapper.h"
 #include "src/interpreter/bytecodes.h"
 #include "src/interpreter/interpreter.h"
@@ -56,6 +57,7 @@
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-engine.h"
+#include "src/wasm/wasm-import-wrapper-cache.h"
 #include "src/wasm/wasm-objects-inl.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -738,16 +740,14 @@ void LowLevelLogger::LogCodeInfo() {
   const char arch[] = "x64";
 #elif V8_TARGET_ARCH_ARM
   const char arch[] = "arm";
-#elif V8_TARGET_ARCH_PPC
-  const char arch[] = "ppc";
 #elif V8_TARGET_ARCH_PPC64
   const char arch[] = "ppc64";
 #elif V8_TARGET_ARCH_LOONG64
   const char arch[] = "loong64";
 #elif V8_TARGET_ARCH_ARM64
   const char arch[] = "arm64";
-#elif V8_TARGET_ARCH_S390
-  const char arch[] = "s390";
+#elif V8_TARGET_ARCH_S390X
+  const char arch[] = "s390x";
 #elif V8_TARGET_ARCH_RISCV64
   const char arch[] = "riscv64";
 #elif V8_TARGET_ARCH_RISCV32
@@ -1603,10 +1603,14 @@ void V8FileLogger::CodeCreateEvent(CodeTag tag, const wasm::WasmCode* code,
   // We have to add two extra fields that allow the tick processor to group
   // events for the same wasm function, even if it gets compiled again. For
   // normal JS functions, we use the shared function info. For wasm, the pointer
-  // to the native module + function index works well enough.
+  // to the native module + function index works well enough. For Wasm wrappers,
+  // just use the address of the WasmCode.
   // TODO(herhut) Clean up the tick processor code instead.
-  void* tag_ptr =
-      reinterpret_cast<uint8_t*>(code->native_module()) + code->index();
+  const void* tag_ptr =
+      code->native_module() != nullptr
+          ? reinterpret_cast<uint8_t*>(code->native_module()) + code->index()
+          : reinterpret_cast<const uint8_t*>(code);
+
   msg << kNext << tag_ptr << kNext << ComputeMarker(code);
   msg.WriteToLogFile();
 }
@@ -2598,7 +2602,7 @@ void ExistingCodeLogger::LogCompiledFunctions(
     // objects are also in trusted space. Currently this breaks because we must
     // not compare objects in trusted space with ones inside the sandbox.
     static_assert(!kAllCodeObjectsLiveInTrustedSpace);
-    if (!IsTrustedSpaceObject(*pair.second) &&
+    if (!HeapLayout::InTrustedSpace(*pair.second) &&
         pair.second.is_identical_to(BUILTIN_CODE(isolate_, CompileLazy))) {
       continue;
     }
@@ -2616,6 +2620,7 @@ void ExistingCodeLogger::LogCompiledFunctions(
     module_object->native_module()->LogWasmCodes(isolate_,
                                                  module_object->script());
   }
+  wasm::GetWasmImportWrapperCache()->LogForIsolate(isolate_);
 #endif  // V8_ENABLE_WEBASSEMBLY
 }
 

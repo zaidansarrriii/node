@@ -119,6 +119,7 @@ namespace internal {
   F(CompileBaseline, 1, 1)                      \
   F(CompileOptimized, 1, 1)                     \
   F(InstallBaselineCode, 1, 1)                  \
+  F(InstallSFICode, 1, 1)                       \
   F(HealOptimizedCodeSlot, 1, 1)                \
   F(FunctionLogNextExecution, 1, 1)             \
   F(InstantiateAsmJs, 4, 1)                     \
@@ -322,6 +323,7 @@ namespace internal {
   F(GetOwnPropertyKeys, 2, 1)                                          \
   F(GetPrivateMember, 2, 1)                                            \
   F(GetProperty, -1 /* [2, 3] */, 1)                                   \
+  F(HandleExceptionsInDisposeDisposableStack, 2, 1)                    \
   F(HasFastPackedElements, 1, 1)                                       \
   F(HasInPrototypeChain, 2, 1)                                         \
   F(HasProperty, 2, 1)                                                 \
@@ -421,6 +423,7 @@ namespace internal {
   F(RegExpExperimentalOneshotExecTreatMatchAtEndAsFailure, 4, 1) \
   F(RegExpExecMultiple, 3, 1)                                    \
   F(RegExpInitializeAndCompile, 3, 1)                            \
+  F(RegExpMatchGlobalAtom, 3, 1)                                 \
   F(RegExpReplaceRT, 3, 1)                                       \
   F(RegExpSplit, 3, 1)                                           \
   F(RegExpStringFromFlags, 1, 1)                                 \
@@ -649,7 +652,7 @@ namespace internal {
   F(WasmI32AtomicWait, 4, 1)                  \
   F(WasmI64AtomicWait, 5, 1)                  \
   F(WasmMemoryGrow, 2, 1)                     \
-  F(WasmStackGuard, 0, 1)                     \
+  F(WasmStackGuard, 1, 1)                     \
   F(WasmThrow, 2, 1)                          \
   F(WasmReThrow, 1, 1)                        \
   F(WasmThrowJSTypeError, 0, 1)               \
@@ -671,7 +674,7 @@ namespace internal {
   F(WasmCompileLazy, 2, 1)                    \
   F(WasmAllocateFeedbackVector, 3, 1)         \
   F(WasmLiftoffDeoptFinish, 1, 1)             \
-  F(WasmCompileWrapper, 1, 1)                 \
+  F(TierUpJSToWasmWrapper, 1, 1)              \
   F(IsWasmExternalFunction, 1, 1)             \
   F(TierUpWasmToJSWrapper, 1, 1)              \
   F(WasmTriggerTierUp, 1, 1)                  \
@@ -700,47 +703,47 @@ namespace internal {
   F(WasmStringHash, 1, 1)                     \
   F(WasmSubstring, 3, 1)
 
-#define FOR_EACH_INTRINSIC_WASM_TEST(F, I)                 \
-  F(CheckIsOnCentralStack, 0, 1)                           \
-  F(CountUnoptimizedWasmToJSWrapper, 1, 1)                 \
-  F(DeserializeWasmModule, 2, 1)                           \
-  F(DisallowWasmCodegen, 1, 1)                             \
-  F(FlushLiftoffCode, 0, 1)                                \
-  F(EstimateCurrentMemoryConsumption, 0, 1)                \
-  F(FreezeWasmLazyCompilation, 1, 1)                       \
-  F(GetWasmExceptionTagId, 2, 1)                           \
-  F(GetWasmExceptionValues, 1, 1)                          \
-  F(GetWasmRecoveredTrapCount, 0, 1)                       \
-  F(HasUnoptimizedJSToJSWrapper, 1, 1)                     \
-  F(HasUnoptimizedWasmToJSWrapper, 1, 1)                   \
-  F(IsAsmWasmCode, 1, 1)                                   \
-  F(IsLiftoffFunction, 1, 1)                               \
-  F(IsThreadInWasm, 0, 1)                                  \
-  F(IsTurboFanFunction, 1, 1)                              \
-  F(IsUncompiledWasmFunction, 1, 1)                        \
-  F(IsWasmCode, 1, 1)                                      \
-  F(IsWasmDebugFunction, 1, 1)                             \
-  F(IsWasmPartialOOBWriteNoop, 0, 1)                       \
-  F(IsWasmTrapHandlerEnabled, 0, 1)                        \
-  F(SerializeWasmModule, 1, 1)                             \
-  F(SetWasmCompileControls, 2, 1)                          \
-  F(SetWasmImportedStringsEnabled, 1, 1)                   \
-  F(SetWasmInstantiateControls, 0, 1)                      \
-  F(WasmCompiledExportWrappersCount, 0, 1)                 \
-  F(WasmDeoptsExecutedCount, 0, 1)                         \
-  F(WasmDeoptsExecutedForFunction, 1, 1)                   \
-  F(WasmEnterDebugging, 0, 1)                              \
-  IF_NO_OFFICIAL_BUILD(F, WasmGenerateRandomModule, -1, 1) \
-  F(WasmGetNumberOfInstances, 1, 1)                        \
-  F(WasmLeaveDebugging, 0, 1)                              \
-  F(WasmNumCodeSpaces, 1, 1)                               \
-  F(WasmSwitchToTheCentralStackCount, 0, 1)                \
-  F(WasmTierUpFunction, 1, 1)                              \
-  F(WasmTraceEnter, 0, 1)                                  \
-  F(WasmTraceExit, 1, 1)                                   \
-  F(WasmTraceMemory, 1, 1)                                 \
-  F(WasmNull, 0, 1)                                        \
-  F(WasmArray, 0, 1)                                       \
+#define FOR_EACH_INTRINSIC_WASM_TEST(F, I)                      \
+  F(CheckIsOnCentralStack, 0, 1)                                \
+  F(CountUnoptimizedWasmToJSWrapper, 1, 1)                      \
+  F(DeserializeWasmModule, 2, 1)                                \
+  F(DisallowWasmCodegen, 1, 1)                                  \
+  F(FlushLiftoffCode, 0, 1)                                     \
+  F(EstimateCurrentMemoryConsumption, 0, 1)                     \
+  F(FreezeWasmLazyCompilation, 1, 1)                            \
+  F(GetWasmExceptionTagId, 2, 1)                                \
+  F(GetWasmExceptionValues, 1, 1)                               \
+  F(GetWasmRecoveredTrapCount, 0, 1)                            \
+  F(HasUnoptimizedJSToJSWrapper, 1, 1)                          \
+  F(HasUnoptimizedWasmToJSWrapper, 1, 1)                        \
+  F(IsAsmWasmCode, 1, 1)                                        \
+  F(IsLiftoffFunction, 1, 1)                                    \
+  F(IsThreadInWasm, 0, 1)                                       \
+  F(IsTurboFanFunction, 1, 1)                                   \
+  F(IsUncompiledWasmFunction, 1, 1)                             \
+  F(IsWasmCode, 1, 1)                                           \
+  F(IsWasmDebugFunction, 1, 1)                                  \
+  F(IsWasmPartialOOBWriteNoop, 0, 1)                            \
+  F(IsWasmTrapHandlerEnabled, 0, 1)                             \
+  F(SerializeWasmModule, 1, 1)                                  \
+  F(SetWasmCompileControls, 2, 1)                               \
+  F(SetWasmImportedStringsEnabled, 1, 1)                        \
+  F(SetWasmInstantiateControls, 0, 1)                           \
+  F(WasmCompiledExportWrappersCount, 0, 1)                      \
+  F(WasmDeoptsExecutedCount, 0, 1)                              \
+  F(WasmDeoptsExecutedForFunction, 1, 1)                        \
+  F(WasmEnterDebugging, 0, 1)                                   \
+  IF_V8_WASM_RANDOM_FUZZERS(F, WasmGenerateRandomModule, -1, 1) \
+  F(WasmGetNumberOfInstances, 1, 1)                             \
+  F(WasmLeaveDebugging, 0, 1)                                   \
+  F(WasmNumCodeSpaces, 1, 1)                                    \
+  F(WasmSwitchToTheCentralStackCount, 0, 1)                     \
+  F(WasmTierUpFunction, 1, 1)                                   \
+  F(WasmTraceEnter, 0, 1)                                       \
+  F(WasmTraceExit, 1, 1)                                        \
+  F(WasmTraceMemory, 1, 1)                                      \
+  F(WasmNull, 0, 1)                                             \
+  F(WasmArray, 0, 1)                                            \
   F(WasmStruct, 0, 1)
 
 #define FOR_EACH_INTRINSIC_WASM_DRUMBRAKE_TEST(F, I) \
@@ -902,7 +905,7 @@ class Runtime : public AllStatic {
   static bool NeedsExactContext(FunctionId id);
 
   // Checks whether the runtime function with the given {id} never returns
-  // to it's caller normally, i.e. whether it'll always raise an exception.
+  // to its caller normally, i.e. whether it'll always raise an exception.
   // More specifically: The C++ implementation returns the Heap::exception
   // sentinel, always.
   static bool IsNonReturning(FunctionId id);

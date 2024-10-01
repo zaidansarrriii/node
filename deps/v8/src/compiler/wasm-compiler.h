@@ -77,14 +77,13 @@ V8_EXPORT_PRIVATE wasm::WasmCompilationResult CompileWasmImportCallWrapper(
     bool source_positions, int expected_arity, wasm::Suspend);
 
 // Compiles a host call wrapper, which allows Wasm to call host functions.
-wasm::WasmCode* CompileWasmCapiCallWrapper(wasm::NativeModule*,
-                                           const wasm::FunctionSig*);
+wasm::WasmCompilationResult CompileWasmCapiCallWrapper(
+    wasm::NativeModule*, const wasm::FunctionSig*);
 
 bool IsFastCallSupportedSignature(const v8::CFunctionInfo*);
 // Compiles a wrapper to call a Fast API function from Wasm.
-wasm::WasmCode* CompileWasmJSFastCallWrapper(wasm::NativeModule*,
-                                             const wasm::FunctionSig*,
-                                             Handle<JSReceiver> callable);
+wasm::WasmCompilationResult CompileWasmJSFastCallWrapper(
+    wasm::NativeModule*, const wasm::FunctionSig*, Handle<JSReceiver> callable);
 
 // Returns an TurbofanCompilationJob or TurboshaftCompilationJob object
 // (depending on the --turboshaft-wasm-wrappers flag) for a JS to Wasm wrapper.
@@ -333,13 +332,6 @@ class WasmGraphBuilder {
   Node* LoadMem(const wasm::WasmMemory* memory, wasm::ValueType type,
                 MachineType memtype, Node* index, uintptr_t offset,
                 uint32_t alignment, wasm::WasmCodePosition position);
-#if defined(V8_TARGET_BIG_ENDIAN) || defined(V8_TARGET_ARCH_S390_LE_SIM)
-  Node* LoadTransformBigEndian(wasm::ValueType type, MachineType memtype,
-                               wasm::LoadTransformationKind transform,
-                               Node* index, uintptr_t offset,
-                               uint32_t alignment,
-                               wasm::WasmCodePosition position);
-#endif
   Node* LoadTransform(const wasm::WasmMemory* memory, wasm::ValueType type,
                       MachineType memtype,
                       wasm::LoadTransformationKind transform, Node* index,
@@ -756,15 +748,15 @@ class WasmGraphBuilder {
                        MachineType result_type, wasm::TrapReason trap_zero,
                        wasm::WasmCodePosition position);
 
-  void MemTypeToUintPtrOrOOBTrap(bool is_memory64,
+  void MemTypeToUintPtrOrOOBTrap(wasm::IndexType index_type,
                                  std::initializer_list<Node**> nodes,
                                  wasm::WasmCodePosition position);
 
-  void TableTypeToUintPtrOrOOBTrap(bool is_table64,
+  void TableTypeToUintPtrOrOOBTrap(wasm::IndexType index_type,
                                    std::initializer_list<Node**> nodes,
                                    wasm::WasmCodePosition position);
 
-  void MemOrTableTypeToUintPtrOrOOBTrap(bool is_64bit,
+  void MemOrTableTypeToUintPtrOrOOBTrap(wasm::IndexType index_type,
                                         std::initializer_list<Node**> nodes,
                                         wasm::WasmCodePosition position,
                                         wasm::TrapReason trap_reason);

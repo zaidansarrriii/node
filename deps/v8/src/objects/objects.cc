@@ -1895,10 +1895,6 @@ int HeapObject::SizeFromMap(Tagged<Map> map) const {
     return BytecodeArray::SizeFor(
         UncheckedCast<BytecodeArray>(*this)->length(kAcquireLoad));
   }
-  if (instance_type == EXTERNAL_POINTER_ARRAY_TYPE) {
-    return ExternalPointerArray::SizeFor(
-        UncheckedCast<ExternalPointerArray>(*this)->length(kAcquireLoad));
-  }
   if (instance_type == FREE_SPACE_TYPE) {
     return UncheckedCast<FreeSpace>(*this)->size(kRelaxedLoad);
   }
@@ -2016,7 +2012,7 @@ bool HeapObject::NeedsRehashing(PtrComprCageBase cage_base) const {
 
 bool HeapObject::NeedsRehashing(InstanceType instance_type) const {
   if (V8_EXTERNAL_CODE_SPACE_BOOL) {
-    // Use map() only when it's guaranteed that it's not a InstructionStream
+    // Use map() only when it's guaranteed that it's not an InstructionStream
     // object.
     DCHECK_IMPLIES(instance_type != INSTRUCTION_STREAM_TYPE,
                    instance_type == map()->instance_type());
@@ -2925,7 +2921,8 @@ Maybe<bool> JSProxy::DeletePropertyOrElement(DirectHandle<JSProxy> proxy,
       isolate, trap, Object::GetMethod(isolate, handler, trap_name),
       Nothing<bool>());
   if (IsUndefined(*trap, isolate)) {
-    return JSReceiver::DeletePropertyOrElement(target, name, language_mode);
+    return JSReceiver::DeletePropertyOrElement(isolate, target, name,
+                                               language_mode);
   }
 
   Handle<Object> trap_result;
@@ -4843,14 +4840,6 @@ const char* JSPromise::Status(v8::Promise::PromiseState status) {
   UNREACHABLE();
 }
 
-int JSPromise::async_task_id() const {
-  return AsyncTaskIdBits::decode(flags());
-}
-
-void JSPromise::set_async_task_id(int id) {
-  set_flags(AsyncTaskIdBits::update(flags(), id));
-}
-
 // static
 Handle<Object> JSPromise::Fulfill(DirectHandle<JSPromise> promise,
                                   DirectHandle<Object> value) {
@@ -5098,6 +5087,7 @@ Handle<Object> JSPromise::TriggerPromiseReactions(
             PromiseReactionJobTask::kSizeOfAllPromiseReactionJobTasks));
     if (type == PromiseReaction::kFulfill) {
       task->set_map(
+          isolate,
           ReadOnlyRoots(isolate).promise_fulfill_reaction_job_task_map(),
           kReleaseStore);
       Cast<PromiseFulfillReactionJobTask>(task)->set_argument(*argument);
@@ -5119,6 +5109,7 @@ Handle<Object> JSPromise::TriggerPromiseReactions(
     } else {
       DisallowGarbageCollection no_gc;
       task->set_map(
+          isolate,
           ReadOnlyRoots(isolate).promise_reject_reaction_job_task_map(),
           kReleaseStore);
       Cast<PromiseRejectReactionJobTask>(task)->set_argument(*argument);
@@ -5321,7 +5312,7 @@ Handle<Derived> HashTable<Derived, Shape>::EnsureCapacity(
 
   bool should_pretenure = allocation == AllocationType::kOld ||
                           ((capacity > kMinCapacityForPretenure) &&
-                           !Heap::InYoungGeneration(*table));
+                           !HeapLayout::InYoungGeneration(*table));
   Handle<Derived> new_table = HashTable::New(
       isolate, new_nof,
       should_pretenure ? AllocationType::kOld : AllocationType::kYoung);
@@ -5381,7 +5372,7 @@ Handle<Derived> HashTable<Derived, Shape>::Shrink(Isolate* isolate,
   DCHECK_GE(new_capacity, Derived::kMinShrinkCapacity);
 
   bool pretenure = (new_capacity > kMinCapacityForPretenure) &&
-                   !Heap::InYoungGeneration(*table);
+                   !HeapLayout::InYoungGeneration(*table);
   Handle<Derived> new_table =
       HashTable::New(isolate, new_capacity,
                      pretenure ? AllocationType::kOld : AllocationType::kYoung,
@@ -6183,8 +6174,11 @@ void JSDisposableStackBase::InitializeJSDisposableStackBase(
     Isolate* isolate, DirectHandle<JSDisposableStackBase> disposable_stack) {
   DirectHandle<FixedArray> array = isolate->factory()->NewFixedArray(0);
   disposable_stack->set_stack(*array);
+  disposable_stack->set_needsAwait(false);
+  disposable_stack->set_hasAwaited(false);
   disposable_stack->set_length(0);
   disposable_stack->set_state(DisposableStackState::kPending);
+  disposable_stack->set_error(*(isolate->factory()->uninitialized_value()));
 }
 
 void PropertyCell::ClearAndInvalidate(ReadOnlyRoots roots) {

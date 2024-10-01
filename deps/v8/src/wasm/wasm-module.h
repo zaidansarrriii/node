@@ -42,6 +42,16 @@ class WasmInterpreterRuntime;
 #endif  // V8_ENABLE_DRUMBRAKE
 class WellKnownImportsList;
 
+enum class IndexType : uint8_t { kI32, kI64 };
+
+inline constexpr const char* IndexTypeToStr(IndexType index_type) {
+  return index_type == IndexType::kI32 ? "i32" : "i64";
+}
+
+inline std::ostream& operator<<(std::ostream& os, IndexType index_type) {
+  return os << IndexTypeToStr(index_type);
+}
+
 // Reference to a string in the wire bytes.
 class WireBytesRef {
  public:
@@ -127,9 +137,9 @@ struct WasmMemory {
   uint32_t maximum_pages = 0;      // maximum size of the memory in 64k pages
   bool is_shared = false;          // true if memory is a SharedArrayBuffer
   bool has_maximum_pages = false;  // true if there is a maximum memory size
-  bool is_memory64 = false;        // true if the memory is 64 bit
-  bool imported = false;           // true if the memory is imported
-  bool exported = false;           // true if the memory is exported
+  IndexType index_type = IndexType::kI32;  // 32 or 64 bit memory?
+  bool imported = false;                   // true if the memory is imported
+  bool exported = false;                   // true if the memory is exported
   // Computed information, cached here for faster compilation.
   // Updated via {UpdateComputedInformation}.
   uintptr_t min_memory_size = 0;  // smallest size of any memory in bytes
@@ -143,11 +153,13 @@ struct WasmMemory {
   inline uint64_t GetMemory64GuardsSize() const {
     return 1ull << GetMemory64GuardsShift();
   }
+
+  bool is_memory64() const { return index_type == IndexType::kI64; }
 };
 
 inline void UpdateComputedInformation(WasmMemory* memory, ModuleOrigin origin) {
   const uintptr_t platform_max_pages =
-      memory->is_memory64 ? kV8MaxWasmMemory64Pages : kV8MaxWasmMemory32Pages;
+      memory->is_memory64() ? kV8MaxWasmMemory64Pages : kV8MaxWasmMemory32Pages;
   memory->min_memory_size =
       std::min(platform_max_pages, uintptr_t{memory->initial_pages}) *
       kWasmPageSize;
@@ -163,7 +175,7 @@ inline void UpdateComputedInformation(WasmMemory* memory, ModuleOrigin origin) {
   } else if (origin != kWasmOrigin) {
     // Asm.js modules can't use trap handling.
     memory->bounds_checks = kExplicitBoundsChecks;
-  } else if (memory->is_memory64 && !v8_flags.wasm_memory64_trap_handling) {
+  } else if (memory->is_memory64() && !v8_flags.wasm_memory64_trap_handling) {
     // Memory64 currently always requires explicit bounds checks.
     memory->bounds_checks = kExplicitBoundsChecks;
   } else if (trap_handler::IsTrapHandlerEnabled()) {
@@ -487,7 +499,8 @@ struct TypeDefinition {
 };
 
 struct V8_EXPORT_PRIVATE WasmDebugSymbols {
-  enum class Type { None, SourceMap, EmbeddedDWARF, ExternalDWARF };
+  static constexpr int kNumTypes = 3;
+  enum Type { SourceMap, EmbeddedDWARF, ExternalDWARF, None };
   Type type = Type::None;
   WireBytesRef external_url;
 };
@@ -635,11 +648,13 @@ struct WasmTable {
   uint32_t initial_size = 0;
   uint32_t maximum_size = 0;
   bool has_maximum_size = false;
-  bool is_table64 = false;
+  IndexType index_type = IndexType::kI32;
   bool shared = false;
   bool imported = false;
   bool exported = false;
   ConstantExpression initial_value = {};
+
+  bool is_table64() const { return index_type == IndexType::kI64; }
 };
 
 // Static representation of a module.
@@ -709,7 +724,7 @@ struct V8_EXPORT_PRIVATE WasmModule {
 
   const ModuleOrigin origin;
   mutable LazilyGeneratedNames lazily_generated_names;
-  WasmDebugSymbols debug_symbols;
+  std::array<WasmDebugSymbols, WasmDebugSymbols::kNumTypes> debug_symbols{};
 
   // Asm.js source position information. Only available for modules compiled
   // from asm.js.
@@ -772,6 +787,13 @@ struct V8_EXPORT_PRIVATE WasmModule {
     size_t num_types = types.size();
     V8_ASSUME(index < num_types);
     return types[index].function_sig;
+  }
+
+  uint32_t canonical_sig_id(uint32_t index) const {
+    DCHECK(has_signature(index));
+    size_t num_types = isorecursive_canonical_type_ids.size();
+    V8_ASSUME(index < num_types);
+    return isorecursive_canonical_type_ids[index];
   }
 
   bool has_struct(uint32_t index) const {

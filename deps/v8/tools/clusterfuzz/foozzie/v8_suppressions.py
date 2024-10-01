@@ -27,14 +27,7 @@ to silence a particular class of problems.
 import itertools
 import re
 
-try:
-  # Python 3
-  from itertools import zip_longest
-  PYTHON3 = True
-except ImportError:
-  # Python 2
-  from itertools import izip_longest as zip_longest
-  PYTHON3 = False
+from itertools import zip_longest
 
 # Max line length for regular experessions checking for lines to ignore.
 MAX_LINE_LENGTH = 512
@@ -71,16 +64,30 @@ ALLOWED_LINE_DIFFS = [
   r'^\s*\^\s*$',
 ]
 
+# Avoid cross-arch comparisons if we find this string in the output.
+# We also need to ignore this output in the diffs as this string might
+# only be printed in the baseline run.
+AVOID_CROSS_ARCH_COMPARISON_RE = (
+    r'^Warning: This run cannot be compared across architectures\.$')
+
 # Lines matching any of the following regular expressions will be ignored.
 # Use uncompiled regular expressions - they'll be compiled later.
 IGNORE_LINES = [
   r'^Warning: .+ is deprecated.*$',
   r'^Try --help for options$',
+  AVOID_CROSS_ARCH_COMPARISON_RE,
 
   # crbug.com/705962
   r'^\s\[0x[0-9a-f]+\]$',
 ]
 
+# List of pairs (<flag string>, <regexp string>). If the regexp matches the
+# test content, the flag is dropped from the command line of any run.
+# If the flag is part of the third run, the entire run is dropped, as it
+# in many cases would just be redundant to the second default run.
+DROP_FLAGS_ON_CONTENT = [
+    ('--jitless', r'\%WasmStruct\(|\%WasmArray\('),
+]
 
 ###############################################################################
 # Implementation - you should not need to change anything below this point.
@@ -180,9 +187,9 @@ def diff_output(output1, output2, allowed, ignore1, ignore2):
 
     # One iterator ends earlier.
     if line1 is None:
-      return '+ %s' % short_line_output(line2), source
+      return f'+ {short_line_output(line2)}', source
     if line2 is None:
-      return '- %s' % short_line_output(line1), source
+      return f'- {short_line_output(line1)}', source
 
     # If lines are equal, no further checks are necessary.
     if line1 == line2:
@@ -202,10 +209,9 @@ def diff_output(output1, output2, allowed, ignore1, ignore2):
       continue
 
     # Lines are different.
-    return (
-        '- %s\n+ %s' % (short_line_output(line1), short_line_output(line2)),
-        source,
-    )
+    short_line1 = short_line_output(line1)
+    short_line2 = short_line_output(line2)
+    return f'- {short_line1}\n+ {short_line2}', source
 
   # No difference found.
   return None, source
@@ -214,13 +220,13 @@ def diff_output(output1, output2, allowed, ignore1, ignore2):
 def get_suppression(skip=False):
   return V8Suppression(skip)
 
+
 def decode(output):
-  if PYTHON3:
-    try:
-      return output.decode('utf-8')
-    except UnicodeDecodeError:
-      return output.decode('latin-1')
-  return output
+  try:
+    return output.decode('utf-8')
+  except UnicodeDecodeError:
+    return output.decode('latin-1')
+
 
 class V8Suppression(object):
   def __init__(self, skip):
@@ -228,10 +234,12 @@ class V8Suppression(object):
       self.allowed_line_diffs = []
       self.ignore_output = {}
       self.ignore_sources = {}
+      self.drop_flags_on_content = []
     else:
       self.allowed_line_diffs = ALLOWED_LINE_DIFFS
       self.ignore_output = IGNORE_OUTPUT
       self.ignore_sources = IGNORE_SOURCES
+      self.drop_flags_on_content = DROP_FLAGS_ON_CONTENT
 
   def diff(self, output1, output2):
     # Diff capped lines in the presence of crashes.
@@ -280,3 +288,61 @@ class V8Suppression(object):
     if bug:
       return bug
     return None
+
+  def _remove_config_flag(self, config, flag):
+    if config.has_config_flag(flag):
+      config.remove_config_flag(flag)
+      return [
+          f'Dropped {flag} from {config.label} config based on content rule.'
+      ]
+    return []
+
+  def adjust_configs_by_content(self, execution_configs, testcase):
+    """Modifies the execution configs if the testcase content matches a
+    regular expression defined in DROP_FLAGS_ON_CONTENT above.
+
+    The specified flag is dropped from the first two configs. Further
+    configs are dropped entirely if the specified flag is used.
+
+    Returns: A changelog as a list of strings.
+    """
+    logs = []
+    assert len(execution_configs) > 1
+    for flag, regexp in self.drop_flags_on_content:
+      # Check first if the flag we need to drop appears anywhere. This is
+      # faster than processing the content.
+      if not any(config.has_config_flag(flag) for config in execution_configs):
+        continue
+      if not re.search(regexp, testcase):
+        continue
+      logs += self._remove_config_flag(execution_configs[0], flag)
+      logs += self._remove_config_flag(execution_configs[1], flag)
+      for config in execution_configs[2:]:
+        if config.has_config_flag(flag):
+          execution_configs.remove(config)
+          logs.append(f'Dropped {config.label} config using '
+                      f'{flag} based on content rule.')
+    return logs
+
+  def adjust_configs_by_output(self, execution_configs, output):
+    """Modifies the execution configs if the baseline output contains a
+    certain directive.
+
+    Currently this only searches for one particular directive, after which
+    we ensure to compare on the same architecture.
+
+    Returns: A changelog as a list of strings.
+    """
+    # Cross-arch configs have a same-arch fallback. Check first if there
+    # are any, as this check is very cheap.
+    logs = []
+    if not any(config.fallback for config in execution_configs):
+      return []
+    if not re.search(AVOID_CROSS_ARCH_COMPARISON_RE, output, re.M):
+      return []
+    for i, config in enumerate(execution_configs):
+      if config.fallback:
+        logs.append(
+            f'Running the {config.label} config on the same architecture.')
+        execution_configs[i] = config.fallback
+    return logs

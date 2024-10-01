@@ -228,7 +228,8 @@ Handle<ClosureFeedbackCellArray> ClosureFeedbackCellArray::New(
 #ifdef V8_ENABLE_LEAPTIERING
     uint16_t parameter_count =
         shared->feedback_metadata()->GetCreateClosureParameterCount(i);
-    cell->initialize_dispatch_handle(isolate, parameter_count);
+    Tagged<Code> initial_code = *BUILTIN_CODE(isolate, CompileLazy);
+    cell->allocate_dispatch_handle(isolate, parameter_count, initial_code);
 #endif
     cells.push_back(cell);
   }
@@ -337,7 +338,7 @@ Handle<FeedbackVector> FeedbackVector::NewForTesting(
       FeedbackMetadata::New(isolate, spec);
   DirectHandle<SharedFunctionInfo> shared =
       isolate->factory()->NewSharedFunctionInfoForBuiltin(
-          isolate->factory()->empty_string(), Builtin::kIllegal);
+          isolate->factory()->empty_string(), Builtin::kIllegal, 0, kDontAdapt);
   // Set the raw feedback metadata to circumvent checks that we are not
   // overwriting existing metadata.
   shared->set_raw_outer_scope_info_or_feedback_metadata(*metadata);

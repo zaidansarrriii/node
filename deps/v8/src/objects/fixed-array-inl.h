@@ -318,7 +318,11 @@ Handle<FixedArray> FixedArray::New(IsolateT* isolate, int capacity,
 // static
 template <class IsolateT>
 Handle<TrustedFixedArray> TrustedFixedArray::New(IsolateT* isolate,
-                                                 int capacity) {
+                                                 int capacity,
+                                                 AllocationType allocation) {
+  DCHECK(allocation == AllocationType::kTrusted ||
+         allocation == AllocationType::kSharedTrusted);
+
   if (V8_UNLIKELY(static_cast<unsigned>(capacity) >
                   TrustedFixedArray::kMaxLength)) {
     FATAL("Fatal JavaScript invalid size error %d (see crbug.com/1201626)",
@@ -330,8 +334,8 @@ Handle<TrustedFixedArray> TrustedFixedArray::New(IsolateT* isolate,
   // The same is true for the other trusted-space arrays below.
 
   std::optional<DisallowGarbageCollection> no_gc;
-  Handle<TrustedFixedArray> result = Cast<TrustedFixedArray>(
-      Allocate(isolate, capacity, &no_gc, AllocationType::kTrusted));
+  Handle<TrustedFixedArray> result =
+      Cast<TrustedFixedArray>(Allocate(isolate, capacity, &no_gc, allocation));
   MemsetTagged((*result)->RawFieldOfFirstElement(), Smi::zero(), capacity);
   return result;
 }
@@ -374,7 +378,7 @@ Handle<D> TaggedArrayBase<D, S, P>::Allocate(
   Tagged<Map> map = Cast<Map>(roots.object_at(S::kMapRootIndex));
   DCHECK(ReadOnlyHeap::Contains(map));
 
-  xs->set_map_after_allocation(map, SKIP_WRITE_BARRIER);
+  xs->set_map_after_allocation(isolate, map, SKIP_WRITE_BARRIER);
   xs->set_capacity(capacity);
 
   return handle(xs, isolate);
@@ -437,8 +441,6 @@ OBJECT_CONSTRUCTORS_IMPL(FixedDoubleArray, FixedDoubleArray::Super)
 OBJECT_CONSTRUCTORS_IMPL(ByteArray, ByteArray::Super)
 
 OBJECT_CONSTRUCTORS_IMPL(TrustedByteArray, TrustedByteArray::Super)
-
-OBJECT_CONSTRUCTORS_IMPL(ExternalPointerArray, FixedArrayBase)
 
 OBJECT_CONSTRUCTORS_IMPL(ArrayList, ArrayList::Super)
 
@@ -732,7 +734,7 @@ Handle<D> PrimitiveArrayBase<D, S, P>::Allocate(
   Tagged<Map> map = Cast<Map>(roots.object_at(S::kMapRootIndex));
   DCHECK(ReadOnlyHeap::Contains(map));
 
-  xs->set_map_after_allocation(map, SKIP_WRITE_BARRIER);
+  xs->set_map_after_allocation(isolate, map, SKIP_WRITE_BARRIER);
   xs->set_length(length);
 
   return handle(xs, isolate);
@@ -1028,24 +1030,6 @@ template <typename T, typename Base>
 int FixedIntegerArrayBase<T, Base>::length() const {
   DCHECK_EQ(Base::length() % sizeof(T), 0);
   return Base::length() / sizeof(T);
-}
-
-template <ExternalPointerTag tag>
-inline Address ExternalPointerArray::get(int index, Isolate* isolate) {
-  return ReadExternalPointerField<tag>(OffsetOfElementAt(index), isolate);
-}
-
-template <ExternalPointerTag tag>
-inline void ExternalPointerArray::set(int index, Isolate* isolate,
-                                      Address value) {
-  WriteLazilyInitializedExternalPointerField<tag>(OffsetOfElementAt(index),
-                                                  isolate, value);
-}
-
-// static
-Handle<ExternalPointerArray> ExternalPointerArray::New(
-    Isolate* isolate, int length, AllocationType allocation) {
-  return isolate->factory()->NewExternalPointerArray(length, allocation);
 }
 
 template <class T, class Super>

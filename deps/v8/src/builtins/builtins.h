@@ -11,6 +11,10 @@
 #include "src/objects/type-hints.h"
 #include "src/sandbox/code-entrypoint-tag.h"
 
+#ifdef V8_ENABLE_WEBASSEMBLY
+#include "src/wasm/wasm-code-pointer-table.h"
+#endif
+
 namespace v8 {
 namespace internal {
 
@@ -75,13 +79,12 @@ class Builtins {
   // Disassembler support.
   const char* Lookup(Address pc);
 
-#if !defined(V8_SHORT_BUILTIN_CALLS) || \
-    defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)
+#if !defined(V8_SHORT_BUILTIN_CALLS) || defined(V8_COMPRESS_POINTERS)
   static constexpr bool kCodeObjectsAreInROSpace = true;
 #else
   static constexpr bool kCodeObjectsAreInROSpace = false;
 #endif  // !defined(V8_SHORT_BUILTIN_CALLS) || \
-        // defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)
+        // defined(V8_COMPRESS_POINTERS)
 
 #define ADD_ONE(Name, ...) +1
   static constexpr int kBuiltinCount =
@@ -106,6 +109,21 @@ class Builtins {
   static constexpr bool kBytecodeHandlersAreSortedLast =
       kLastBytecodeHandlerPlusOne == kBuiltinCount;
   static_assert(kBytecodeHandlersAreSortedLast);
+
+#ifdef V8_ENABLE_WEBASSEMBLY
+  // The list of builtins that can be called indirectly from Wasm and need an
+  // entry in the WasmCodePointerTable.
+  static constexpr Builtin kWasmIndirectlyCallableBuiltins[] = {
+      Builtin::kWasmToOnHeapWasmToJsTrampoline,
+      Builtin::kWasmToJsWrapperInvalidSig, Builtin::kWasmToJsWrapperAsm};
+  static constexpr size_t kNumWasmIndirectlyCallableBuiltins =
+      arraysize(kWasmIndirectlyCallableBuiltins);
+  using WasmBuiltinHandleArray =
+      wasm::WasmCodePointerTable::Handle[kNumWasmIndirectlyCallableBuiltins];
+  // TODO(sroettger): this can be consteval, but the gcc bot doesn't support it.
+  template <Builtin builtin>
+  static constexpr size_t WasmBuiltinHandleArrayIndex();
+#endif
 
   static constexpr bool IsBuiltinId(Builtin builtin) {
     return builtin != Builtin::kNoBuiltinId;
@@ -200,6 +218,13 @@ class Builtins {
   // Loads the builtin's entry (start of instruction stream) from the isolate's
   // builtin_entry_table, initialized earlier via {InitializeIsolateDataTables}.
   static inline Address EntryOf(Builtin builtin, Isolate* isolate);
+
+#ifdef V8_ENABLE_WEBASSEMBLY
+  // Returns a handle to the WasmCodePointerTable entry for a given builtin.
+  template <Builtin builtin>
+  static inline wasm::WasmCodePointerTable::Handle WasmBuiltinHandleOf(
+      Isolate* isolate);
+#endif
 
   V8_EXPORT_PRIVATE static Kind KindOf(Builtin builtin);
   static const char* KindNameOf(Builtin builtin);

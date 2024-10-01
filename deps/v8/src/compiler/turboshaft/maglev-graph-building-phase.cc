@@ -420,7 +420,7 @@ class GeneratorAnalyzer {
   std::unordered_set<const maglev::BasicBlock*> bypassed_headers_;
 
   // {visit_queue_} is used in FindLoopBody to store nodes that still need to be
-  // visited. It is a instance variable in order to reuse its memory more
+  // visited. It is an instance variable in order to reuse its memory more
   // efficiently.
   ZoneVector<const maglev::BasicBlock*> visit_queue_;
 };
@@ -472,16 +472,17 @@ class GeneratorAnalyzer {
 //    {current_catch_block} (in particular with nested scopes) might introduce
 //    even more complexity and magic in the assembler.
 
-class GraphBuilder {
+class GraphBuildingNodeProcessor {
  public:
   using AssemblerT =
       TSAssembler<BlockOriginTrackingReducer, MaglevEarlyLoweringReducer,
                   MachineOptimizationReducer, VariableReducer,
                   RequiredOptimizationReducer, ValueNumberingReducer>;
 
-  GraphBuilder(PipelineData* data, Graph& graph, Zone* temp_zone,
-               maglev::MaglevCompilationUnit* maglev_compilation_unit,
-               std::optional<BailoutReason>* bailout)
+  GraphBuildingNodeProcessor(
+      PipelineData* data, Graph& graph, Zone* temp_zone,
+      maglev::MaglevCompilationUnit* maglev_compilation_unit,
+      std::optional<BailoutReason>* bailout)
       : data_(data),
         temp_zone_(temp_zone),
         assembler_(data, graph, graph, temp_zone),
@@ -1097,7 +1098,8 @@ class GraphBuilder {
     std::string reg_string_name = node->source().ToString();
     base::Vector<char> debug_name_arr =
         graph_zone()->NewVector<char>(reg_string_name.length() + /* \n */ 1);
-    strcpy(debug_name_arr.data(), reg_string_name.c_str());
+    snprintf(debug_name_arr.data(), debug_name_arr.length(), "%s",
+             reg_string_name.c_str());
     char* debug_name = debug_name_arr.data();
 #else
     char* debug_name = nullptr;
@@ -3518,8 +3520,9 @@ class GraphBuilder {
   maglev::ProcessResult Process(maglev::Int32NegateWithOverflow* node,
                                 const maglev::ProcessingState& state) {
     GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
-    // Turboshaft doesn't have a Int32NegateWithOverflow operation, but Turbofan
-    // emits mutliplications by -1 for this, so using this as well here.
+    // Turboshaft doesn't have an Int32NegateWithOverflow operation, but
+    // Turbofan emits multiplications by -1 for this, so using this as well
+    // here.
     SetMap(node, __ Word32SignedMulDeoptOnOverflow(
                      Map(node->value_input()), -1, frame_state,
                      node->eager_deopt_info()->feedback_to_update(),
@@ -3584,7 +3587,7 @@ class GraphBuilder {
                                 const maglev::ProcessingState& state) {
     V<Word32> input = Map(node->input());
     GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
-    ScopedVariable<Word32, AssemblerT> result(this, input);
+    ScopedVar<Word32, AssemblerT> result(this, input);
 
     IF (__ Int32LessThan(input, 0)) {
       V<Tuple<Word32, Word32>> result_with_ovf =
@@ -3621,8 +3624,7 @@ class GraphBuilder {
       // adjusting if the difference exceeds 0.5 (like SimplifiedLowering does
       // for lower Float64Round).
       OpIndex input = Map(node->input());
-      ScopedVariable<Float64, AssemblerT> result(this,
-                                                 __ Float64RoundUp(input));
+      ScopedVar<Float64, AssemblerT> result(this, __ Float64RoundUp(input));
       IF_NOT (__ Float64LessThanOrEqual(__ Float64Sub(result, 0.5), input)) {
         result = __ Float64Sub(result, 1.0);
       }
@@ -4049,7 +4051,7 @@ class GraphBuilder {
   static constexpr int kMinClampedUint8 = 0;
   static constexpr int kMaxClampedUint8 = 255;
   V<Word32> Int32ToUint8Clamped(V<Word32> value) {
-    ScopedVariable<Word32, AssemblerT> result(this);
+    ScopedVar<Word32, AssemblerT> result(this);
     IF (__ Int32LessThan(value, kMinClampedUint8)) {
       result = __ Word32Constant(kMinClampedUint8);
     } ELSE IF (__ Int32LessThan(value, kMaxClampedUint8)) {
@@ -4060,7 +4062,7 @@ class GraphBuilder {
     return result;
   }
   V<Word32> Float64ToUint8Clamped(V<Float64> value) {
-    ScopedVariable<Word32, AssemblerT> result(this);
+    ScopedVar<Word32, AssemblerT> result(this);
     IF (__ Float64LessThan(value, kMinClampedUint8)) {
       result = __ Word32Constant(kMinClampedUint8);
     } ELSE IF (__ Float64LessThan(kMaxClampedUint8, value)) {
@@ -4081,7 +4083,7 @@ class GraphBuilder {
   }
   maglev::ProcessResult Process(maglev::Uint32ToUint8Clamped* node,
                                 const maglev::ProcessingState& state) {
-    ScopedVariable<Word32, AssemblerT> result(this);
+    ScopedVar<Word32, AssemblerT> result(this);
     V<Word32> value = Map(node->input());
     IF (__ Uint32LessThan(value, kMaxClampedUint8)) {
       result = value;
@@ -4098,7 +4100,7 @@ class GraphBuilder {
   }
   maglev::ProcessResult Process(maglev::CheckedNumberToUint8Clamped* node,
                                 const maglev::ProcessingState& state) {
-    ScopedVariable<Word32, AssemblerT> result(this);
+    ScopedVar<Word32, AssemblerT> result(this);
     V<Object> value = Map(node->input());
     GET_FRAME_STATE_MAYBE_ABORT(frame_state, node->eager_deopt_info());
     IF (__ IsSmi(value)) {
@@ -5212,7 +5214,8 @@ class GraphBuilder {
     // intepreter register.
 
    public:
-    ThrowingScope(GraphBuilder* builder, maglev::NodeBase* throwing_node)
+    ThrowingScope(GraphBuildingNodeProcessor* builder,
+                  maglev::NodeBase* throwing_node)
         : builder_(*builder) {
       DCHECK_EQ(__ current_catch_block(), nullptr);
       if (!throwing_node->properties().can_throw()) return;
@@ -5287,8 +5290,8 @@ class GraphBuilder {
     }
 
    private:
-    GraphBuilder::AssemblerT& Asm() { return builder_.Asm(); }
-    GraphBuilder& builder_;
+    GraphBuildingNodeProcessor::AssemblerT& Asm() { return builder_.Asm(); }
+    GraphBuildingNodeProcessor& builder_;
     const maglev::BasicBlock* catch_block_ = nullptr;
   };
 
@@ -5497,17 +5500,17 @@ class GraphBuilder {
   std::optional<BailoutReason>* bailout_;
 };
 
-// A NodeProcessor wrapper around GraphBuilder that takes care of
+// A wrapper around GraphBuildingNodeProcessor that takes care of
 //  - skipping nodes when we are in Unreachable code.
 //  - recording source positions.
-class NodeProcessorBase : public GraphBuilder {
+class NodeProcessorBase : public GraphBuildingNodeProcessor {
  public:
-  using GraphBuilder::GraphBuilder;
+  using GraphBuildingNodeProcessor::GraphBuildingNodeProcessor;
 
   NodeProcessorBase(PipelineData* data, Graph& graph, Zone* temp_zone,
                     maglev::MaglevCompilationUnit* maglev_compilation_unit,
                     std::optional<BailoutReason>* bailout)
-      : GraphBuilder::GraphBuilder(data, graph, temp_zone,
+      : GraphBuildingNodeProcessor(data, graph, temp_zone,
                                    maglev_compilation_unit, bailout),
         graph_(graph),
         labeller_(maglev_compilation_unit->graph_labeller()) {}
@@ -5515,25 +5518,26 @@ class NodeProcessorBase : public GraphBuilder {
   template <typename NodeT>
   maglev::ProcessResult Process(NodeT* node,
                                 const maglev::ProcessingState& state) {
-    if (GraphBuilder::Asm().generating_unreachable_operations()) {
+    if (GraphBuildingNodeProcessor::Asm().generating_unreachable_operations()) {
       // It doesn't matter much whether we return kRemove or kContinue here,
-      // since anyways we'll be done with the Maglev graph once this phase is
+      // since we'll be done with the Maglev graph anyway once this phase is
       // over. Maglev currently doesn't support kRemove for control nodes, so we
       // just return kContinue for simplicity.
       return maglev::ProcessResult::kContinue;
-    } else {
-      OpIndex end_index_before = graph_.EndIndex();
-      maglev::ProcessResult result = GraphBuilder::Process(node, state);
-
-      // Recording the SourcePositions of the OpIndex that were just created.
-      SourcePosition source = labeller_->GetNodeProvenance(node).position;
-      for (OpIndex idx = end_index_before; idx != graph_.EndIndex();
-           idx = graph_.NextIndex(idx)) {
-        graph_.source_positions()[idx] = source;
-      }
-
-      return result;
     }
+
+    OpIndex end_index_before = graph_.EndIndex();
+    maglev::ProcessResult result =
+        GraphBuildingNodeProcessor::Process(node, state);
+
+    // Recording the SourcePositions of the OpIndex that were just created.
+    SourcePosition source = labeller_->GetNodeProvenance(node).position;
+    for (OpIndex idx = end_index_before; idx != graph_.EndIndex();
+         idx = graph_.NextIndex(idx)) {
+      graph_.source_positions()[idx] = source;
+    }
+
+    return result;
   }
 
  private:

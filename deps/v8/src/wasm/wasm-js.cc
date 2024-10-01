@@ -41,10 +41,11 @@
 
 namespace v8 {
 
-using v8::internal::wasm::CompileTimeImport;
-using v8::internal::wasm::CompileTimeImports;
-using v8::internal::wasm::ErrorThrower;
-using v8::internal::wasm::WasmEnabledFeatures;
+using i::wasm::CompileTimeImport;
+using i::wasm::CompileTimeImports;
+using i::wasm::ErrorThrower;
+using i::wasm::IndexType;
+using i::wasm::WasmEnabledFeatures;
 
 namespace internal {
 
@@ -202,8 +203,8 @@ GET_FIRST_ARGUMENT_AS(Tag)
 #undef GET_FIRST_ARGUMENT_AS
 
 i::wasm::ModuleWireBytes GetFirstArgumentAsBytes(
-    const v8::FunctionCallbackInfo<v8::Value>& info, ErrorThrower* thrower,
-    bool* is_shared) {
+    const v8::FunctionCallbackInfo<v8::Value>& info, size_t max_length,
+    ErrorThrower* thrower, bool* is_shared) {
   DCHECK(i::ValidateCallbackInfo(info));
   const uint8_t* start = nullptr;
   size_t length = 0;
@@ -234,7 +235,6 @@ i::wasm::ModuleWireBytes GetFirstArgumentAsBytes(
   if (length == 0) {
     thrower->CompileError("BufferSource argument is empty");
   }
-  size_t max_length = i::wasm::max_module_size();
   if (length > max_length) {
     // The spec requires a CompileError for implementation-defined limits, see
     // https://webassembly.github.io/spec/js-api/index.html#limits.
@@ -492,33 +492,32 @@ std::string ToString(const i::DirectHandle<i::String> name) {
 // Previously called ToNonWrappingUint32 in the draft WebAssembly JS spec.
 // https://heycam.github.io/webidl/#EnforceRange
 template <typename T>
-bool EnforceUint32(T argument_name, Local<v8::Value> v, Local<Context> context,
-                   ErrorThrower* thrower, uint32_t* res) {
+std::optional<uint32_t> EnforceUint32(T argument_name, Local<v8::Value> v,
+                                      Local<Context> context,
+                                      ErrorThrower* thrower) {
   double double_number;
-
   if (!v->NumberValue(context).To(&double_number)) {
     thrower->TypeError("%s must be convertible to a number",
                        ToString(argument_name).c_str());
-    return false;
+    return std::nullopt;
   }
   if (!std::isfinite(double_number)) {
     thrower->TypeError("%s must be convertible to a valid number",
                        ToString(argument_name).c_str());
-    return false;
+    return std::nullopt;
   }
   if (double_number < 0) {
     thrower->TypeError("%s must be non-negative",
                        ToString(argument_name).c_str());
-    return false;
+    return std::nullopt;
   }
   if (double_number > std::numeric_limits<uint32_t>::max()) {
     thrower->TypeError("%s must be in the unsigned long range",
                        ToString(argument_name).c_str());
-    return false;
+    return std::nullopt;
   }
 
-  *res = static_cast<uint32_t>(double_number);
-  return true;
+  return static_cast<uint32_t>(double_number);
 }
 
 // The enum values need to match "WasmCompilationMethod" in
@@ -579,10 +578,17 @@ CompileTimeImports ArgumentToCompileOptions(
         // style (rather than `...->StringEquals(v8_str(...))`).
         if (builtin->IsEqualTo(base::CStrVector("js-string"))) {
           result.Add(CompileTimeImport::kJsString);
-        } else if (builtin->IsEqualTo(base::CStrVector("text-encoder"))) {
-          result.Add(CompileTimeImport::kTextEncoder);
-        } else if (builtin->IsEqualTo(base::CStrVector("text-decoder"))) {
-          result.Add(CompileTimeImport::kTextDecoder);
+          continue;
+        }
+        if (enabled_features.has_imported_strings_utf8()) {
+          if (builtin->IsEqualTo(base::CStrVector("text-encoder"))) {
+            result.Add(CompileTimeImport::kTextEncoder);
+            continue;
+          }
+          if (builtin->IsEqualTo(base::CStrVector("text-decoder"))) {
+            result.Add(CompileTimeImport::kTextDecoder);
+            continue;
+          }
         }
       }
     }
@@ -637,7 +643,8 @@ void WebAssemblyCompileImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
       new AsyncCompilationResolver(isolate, context, promise_resolver));
 
   bool is_shared = false;
-  auto bytes = GetFirstArgumentAsBytes(info, &thrower, &is_shared);
+  auto bytes = GetFirstArgumentAsBytes(info, i::wasm::max_module_size(),
+                                       &thrower, &is_shared);
   if (thrower.error()) {
     resolver->OnCompilationFailed(thrower.Reify());
     return;
@@ -669,8 +676,11 @@ void WasmStreamingCallbackForTesting(
       v8::WasmStreaming::Unpack(info.GetIsolate(), info.Data());
 
   bool is_shared = false;
+  // We don't check the buffer length up front, to allow d8 to test that the
+  // streaming decoder implementation handles overly large inputs correctly.
+  size_t unlimited = std::numeric_limits<size_t>::max();
   i::wasm::ModuleWireBytes bytes =
-      GetFirstArgumentAsBytes(info, &thrower, &is_shared);
+      GetFirstArgumentAsBytes(info, unlimited, &thrower, &is_shared);
   if (thrower.error()) {
     streaming->Abort(Utils::ToLocal(thrower.Reify()));
     return;
@@ -771,7 +781,8 @@ void WebAssemblyValidateImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   ErrorThrower thrower(i_isolate, "WebAssembly.validate()");
 
   bool is_shared = false;
-  auto bytes = GetFirstArgumentAsBytes(info, &thrower, &is_shared);
+  auto bytes = GetFirstArgumentAsBytes(info, i::wasm::max_module_size(),
+                                       &thrower, &is_shared);
 
   v8::ReturnValue<v8::Value> return_value = info.GetReturnValue();
 
@@ -850,7 +861,8 @@ void WebAssemblyModuleImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   }
 
   bool is_shared = false;
-  auto bytes = GetFirstArgumentAsBytes(info, &thrower, &is_shared);
+  auto bytes = GetFirstArgumentAsBytes(info, i::wasm::max_module_size(),
+                                       &thrower, &is_shared);
 
   if (thrower.error()) {
     return;
@@ -1168,7 +1180,8 @@ void WebAssemblyInstantiateImpl(
   }
 
   bool is_shared = false;
-  auto bytes = GetFirstArgumentAsBytes(info, &thrower, &is_shared);
+  auto bytes = GetFirstArgumentAsBytes(info, i::wasm::max_module_size(),
+                                       &thrower, &is_shared);
   if (thrower.error()) {
     resolver->OnInstantiationFailed(thrower.Reify());
     return;
@@ -1209,98 +1222,96 @@ void WebAssemblyInstantiateImpl(
       std::move(compilation_resolver), bytes, is_shared, kAPIMethodName);
 }
 
-bool GetIntegerProperty(v8::Isolate* isolate, ErrorThrower* thrower,
-                        Local<Context> context, v8::Local<v8::Value> value,
-                        i::Handle<i::String> property_name, int64_t* result,
-                        int64_t lower_bound, uint64_t upper_bound) {
-  uint32_t number;
-  if (!EnforceUint32(property_name, value, context, thrower, &number)) {
-    return false;
-  }
-  if (number < lower_bound) {
+// Returns std::nullopt on error (exception or error set in the thrower), and
+// the index value otherwise.
+std::optional<uint32_t> GetIndexValue(ErrorThrower* thrower,
+                                      Local<Context> context,
+                                      v8::Local<v8::Value> value,
+                                      i::Handle<i::String> property_name,
+                                      int64_t lower_bound,
+                                      uint64_t upper_bound) {
+  std::optional<uint32_t> maybe_result =
+      EnforceUint32(property_name, value, context, thrower);
+  if (!maybe_result) return std::nullopt;
+  uint32_t result = *maybe_result;
+  if (result < lower_bound) {
     thrower->RangeError("Property '%s': value %" PRIu32
                         " is below the lower bound %" PRIx64,
-                        property_name->ToCString().get(), number, lower_bound);
-    return false;
+                        property_name->ToCString().get(), result, lower_bound);
+    return std::nullopt;
   }
-  if (number > upper_bound) {
+  if (result > upper_bound) {
     thrower->RangeError("Property '%s': value %" PRIu32
                         " is above the upper bound %" PRIu64,
-                        property_name->ToCString().get(), number, upper_bound);
-    return false;
+                        property_name->ToCString().get(), result, upper_bound);
+    return std::nullopt;
   }
 
-  *result = static_cast<int64_t>(number);
-  return true;
+  return result;
 }
 
-bool GetOptionalIntegerProperty(v8::Isolate* isolate, ErrorThrower* thrower,
-                                Local<Context> context,
-                                Local<v8::Object> object,
-                                Local<String> property, bool* has_property,
-                                int64_t* result, int64_t lower_bound,
-                                uint64_t upper_bound) {
+// Returns std::nullopt on error (exception or error set in the thrower).
+// The inner optional is std::nullopt if the property did not exist, and the
+// index value otherwise.
+std::optional<std::optional<uint32_t>> GetOptionalIndexValue(
+    ErrorThrower* thrower, Local<Context> context, Local<v8::Object> descriptor,
+    Local<String> property, int64_t lower_bound, uint64_t upper_bound) {
   v8::Local<v8::Value> value;
-  if (!object->Get(context, property).ToLocal(&value)) {
-    return false;
+  if (!descriptor->Get(context, property).ToLocal(&value)) {
+    return std::nullopt;
   }
 
   // Web IDL: dictionary presence
   // https://heycam.github.io/webidl/#dfn-present
-  if (value->IsUndefined()) {
-    if (has_property != nullptr) *has_property = false;
-    return true;
-  }
+  if (value->IsUndefined()) return std::optional<uint32_t>{};
 
-  if (has_property != nullptr) *has_property = true;
   i::Handle<i::String> property_name = v8::Utils::OpenHandle(*property);
 
-  return GetIntegerProperty(isolate, thrower, context, value, property_name,
-                            result, lower_bound, upper_bound);
+  std::optional<uint32_t> maybe_index_value = GetIndexValue(
+      thrower, context, value, property_name, lower_bound, upper_bound);
+  if (!maybe_index_value) return std::nullopt;
+  return *maybe_index_value;
 }
 
-// Fetch 'initial' or 'minimum' property from object. If both are provided,
-// a TypeError is thrown.
+// Fetch 'initial' or 'minimum' property from `descriptor`. If both are
+// provided, a TypeError is thrown.
+// Returns std::nullopt on error (exception or error set in the thrower).
 // TODO(aseemgarg): change behavior when the following bug is resolved:
 // https://github.com/WebAssembly/js-types/issues/6
-bool GetInitialOrMinimumProperty(v8::Isolate* isolate, ErrorThrower* thrower,
-                                 Local<Context> context,
-                                 Local<v8::Object> object, int64_t* result,
-                                 int64_t lower_bound, uint64_t upper_bound) {
-  bool has_initial = false;
-  if (!GetOptionalIntegerProperty(isolate, thrower, context, object,
-                                  v8_str(isolate, "initial"), &has_initial,
-                                  result, lower_bound, upper_bound)) {
-    return false;
-  }
+std::optional<uint32_t> GetInitialOrMinimumProperty(
+    v8::Isolate* isolate, ErrorThrower* thrower, Local<Context> context,
+    Local<v8::Object> descriptor, uint64_t upper_bound) {
+  auto maybe_maybe_initial = GetOptionalIndexValue(
+      thrower, context, descriptor, v8_str(isolate, "initial"), 0, upper_bound);
+  if (!maybe_maybe_initial) return std::nullopt;
+  std::optional<uint32_t> maybe_initial = *maybe_maybe_initial;
+
   auto enabled_features =
       WasmEnabledFeatures::FromIsolate(reinterpret_cast<i::Isolate*>(isolate));
   if (enabled_features.has_type_reflection()) {
-    bool has_minimum = false;
-    int64_t minimum = 0;
-    if (!GetOptionalIntegerProperty(isolate, thrower, context, object,
-                                    v8_str(isolate, "minimum"), &has_minimum,
-                                    &minimum, lower_bound, upper_bound)) {
-      return false;
-    }
-    if (has_initial && has_minimum) {
+    auto maybe_maybe_minimum =
+        GetOptionalIndexValue(thrower, context, descriptor,
+                              v8_str(isolate, "minimum"), 0, upper_bound);
+    if (!maybe_maybe_minimum) return std::nullopt;
+    std::optional<uint32_t> maybe_minimum = *maybe_maybe_minimum;
+
+    if (maybe_initial && maybe_minimum) {
       thrower->TypeError(
           "The properties 'initial' and 'minimum' are not allowed at the same "
           "time");
-      return false;
+      return std::nullopt;
     }
-    if (has_minimum) {
-      // Only {minimum} exists, so we use {minimum} as {initial}.
-      has_initial = true;
-      *result = minimum;
+    if (maybe_minimum) {
+      // Only 'minimum' exists, so we use 'minimum' as 'initial'.
+      return *maybe_minimum;
     }
   }
-  if (!has_initial) {
+  if (!maybe_initial) {
     // TODO(aseemgarg): update error message when the spec issue is resolved.
     thrower->TypeError("Property 'initial' is required");
-    return false;
+    return std::nullopt;
   }
-  return true;
+  return *maybe_initial;
 }
 
 namespace {
@@ -1315,9 +1326,31 @@ i::Handle<i::HeapObject> DefaultReferenceValue(i::Isolate* isolate,
   }
   return isolate->factory()->wasm_null();
 }
+
+// Read the index type from a Memory or Table descriptor.
+std::optional<IndexType> GetIndexType(Isolate* isolate, Local<Context> context,
+                                      Local<v8::Object> descriptor,
+                                      ErrorThrower* thrower) {
+  v8::Local<v8::Value> index_value;
+  if (!descriptor->Get(context, v8_str(isolate, "index"))
+           .ToLocal(&index_value)) {
+    return std::nullopt;
+  }
+
+  if (index_value->IsUndefined()) return IndexType::kI32;
+
+  v8::Local<v8::String> index;
+  if (!index_value->ToString(context).ToLocal(&index)) return std::nullopt;
+
+  if (index->StringEquals(v8_str(isolate, "i64"))) return IndexType::kI64;
+  if (index->StringEquals(v8_str(isolate, "i32"))) return IndexType::kI32;
+
+  thrower->TypeError("Unknown index type; pass 'i32' or 'i64'");
+  return std::nullopt;
+}
 }  // namespace
 
-// new WebAssembly.Table(info) -> WebAssembly.Table
+// new WebAssembly.Table(descriptor) -> WebAssembly.Table
 void WebAssemblyTableImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   DCHECK(i::ValidateCallbackInfo(info));
   v8::Isolate* isolate = info.GetIsolate();
@@ -1335,7 +1368,7 @@ void WebAssemblyTableImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   Local<Context> context = isolate->GetCurrentContext();
   Local<v8::Object> descriptor = Local<Object>::Cast(info[0]);
   i::wasm::ValueType type;
-  // The descriptor's 'element'.
+  // Parse the 'element' property of the `descriptor`.
   {
     v8::MaybeLocal<v8::Value> maybe =
         descriptor->Get(context, v8_str(isolate, "element"));
@@ -1375,52 +1408,40 @@ void WebAssemblyTableImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
     // TODO(14616): Support shared types.
   }
 
-  int64_t initial = 0;
-  if (!GetInitialOrMinimumProperty(isolate, &thrower, context, descriptor,
-                                   &initial, 0,
-                                   i::wasm::max_table_init_entries())) {
+  // Parse the 'initial' or 'minimum' property of the `descriptor`.
+  std::optional<uint32_t> maybe_initial =
+      GetInitialOrMinimumProperty(isolate, &thrower, context, descriptor,
+                                  i::wasm::max_table_init_entries());
+  if (!maybe_initial) {
     DCHECK(i_isolate->has_exception() || thrower.error());
     return;
   }
-  // The descriptor's 'maximum'.
-  int64_t maximum = -1;
-  bool has_maximum = true;
-  if (!GetOptionalIntegerProperty(isolate, &thrower, context, descriptor,
-                                  v8_str(isolate, "maximum"), &has_maximum,
-                                  &maximum, initial,
-                                  std::numeric_limits<uint32_t>::max())) {
+  uint32_t initial = *maybe_initial;
+
+  // Parse the 'maximum' property of the `descriptor`.
+  auto maybe_maybe_maximum = GetOptionalIndexValue(
+      &thrower, context, descriptor, v8_str(isolate, "maximum"), initial,
+      std::numeric_limits<uint32_t>::max());
+  if (!maybe_maybe_maximum) {
     DCHECK(i_isolate->has_exception() || thrower.error());
     return;
   }
+  std::optional<uint32_t> maybe_maximum = *maybe_maybe_maximum;
 
-  // Parse the 'index' property of the descriptor.
-  v8::Local<v8::Value> index_value;
-  if (!descriptor->Get(context, v8_str(isolate, "index"))
-           .ToLocal(&index_value)) {
-    DCHECK(i_isolate->has_exception());
+  // Parse the 'index' property of the `descriptor`.
+  std::optional<IndexType> maybe_index_type =
+      GetIndexType(isolate, context, descriptor, &thrower);
+  if (!maybe_index_type) {
+    DCHECK(i_isolate->has_exception() || thrower.error());
     return;
   }
-
-  i::WasmTableFlag is_table64_flag = i::WasmTableFlag::kTable32;
-  if (!index_value->IsUndefined()) {
-    v8::Local<v8::String> index;
-    if (!index_value->ToString(context).ToLocal(&index)) {
-      DCHECK(i_isolate->has_exception());
-      return;
-    }
-    if (index->StringEquals(v8_str(isolate, "i64"))) {
-      is_table64_flag = i::WasmTableFlag::kTable64;
-    } else if (!index->StringEquals(v8_str(isolate, "i32"))) {
-      thrower.TypeError("Unknown table index");
-      return;
-    }
-  }
+  IndexType index_type = *maybe_index_type;
 
   i::Handle<i::WasmTableObject> table_obj = i::WasmTableObject::New(
-      i_isolate, i::Handle<i::WasmTrustedInstanceData>(), type,
-      static_cast<uint32_t>(initial), has_maximum,
-      static_cast<uint32_t>(maximum), DefaultReferenceValue(i_isolate, type),
-      is_table64_flag);
+      i_isolate, i::Handle<i::WasmTrustedInstanceData>(), type, initial,
+      maybe_maximum.has_value(),
+      maybe_maximum.value_or(0) /* note: unused if previous param is false */,
+      DefaultReferenceValue(i_isolate, type), index_type);
 
   // The infrastructure for `new Foo` calls allocates an object, which is
   // available here as {info.This()}. We're going to discard this object
@@ -1473,6 +1494,7 @@ void WebAssemblyTableImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   return_value.Set(Utils::ToLocal(i::Cast<i::JSObject>(table_obj)));
 }
 
+// new WebAssembly.Memory(descriptor) -> WebAssembly.Memory
 void WebAssemblyMemoryImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   DCHECK(i::ValidateCallbackInfo(info));
   v8::Isolate* isolate = info.GetIsolate();
@@ -1490,50 +1512,38 @@ void WebAssemblyMemoryImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   Local<Context> context = isolate->GetCurrentContext();
   Local<v8::Object> descriptor = Local<Object>::Cast(info[0]);
 
-  // Parse the 'index' property of the descriptor.
-  v8::Local<v8::Value> index_value;
-  if (!descriptor->Get(context, v8_str(isolate, "index"))
-           .ToLocal(&index_value)) {
-    DCHECK(i_isolate->has_exception());
+  // Parse the 'index' property of the `descriptor`.
+  std::optional<IndexType> maybe_index_type =
+      GetIndexType(isolate, context, descriptor, &thrower);
+  if (!maybe_index_type) {
+    DCHECK(i_isolate->has_exception() || thrower.error());
     return;
   }
-
-  i::WasmMemoryFlag memory_flag = i::WasmMemoryFlag::kWasmMemory32;
-  if (!index_value->IsUndefined()) {
-    v8::Local<v8::String> index;
-    if (!index_value->ToString(context).ToLocal(&index)) {
-      DCHECK(i_isolate->has_exception());
-      return;
-    }
-    if (index->StringEquals(v8_str(isolate, "i64"))) {
-      memory_flag = i::WasmMemoryFlag::kWasmMemory64;
-    } else if (!index->StringEquals(v8_str(isolate, "i32"))) {
-      thrower.TypeError("Unknown memory index");
-      return;
-    }
-  }
-  size_t max_supported_pages = memory_flag == i::WasmMemoryFlag::kWasmMemory64
+  IndexType index_type = *maybe_index_type;
+  size_t max_supported_pages = index_type == IndexType::kI64
                                    ? i::wasm::kSpecMaxMemory64Pages
                                    : i::wasm::kSpecMaxMemory32Pages;
 
-  // Parse the 'initial' or 'minimum' property of the descriptor.
-  int64_t initial = 0;
-  if (!GetInitialOrMinimumProperty(isolate, &thrower, context, descriptor,
-                                   &initial, 0, max_supported_pages)) {
+  // Parse the 'initial' or 'minimum' property of the `descriptor`.
+  std::optional<uint32_t> maybe_initial = GetInitialOrMinimumProperty(
+      isolate, &thrower, context, descriptor, max_supported_pages);
+  if (!maybe_initial) {
     DCHECK(i_isolate->has_exception() || thrower.error());
     return;
   }
+  uint32_t initial = *maybe_initial;
 
-  // Parse the 'maximum' property of the descriptor.
-  int64_t maximum = i::WasmMemoryObject::kNoMaximum;
-  if (!GetOptionalIntegerProperty(isolate, &thrower, context, descriptor,
-                                  v8_str(isolate, "maximum"), nullptr, &maximum,
-                                  initial, max_supported_pages)) {
+  // Parse the 'maximum' property of the `descriptor`.
+  auto maybe_maybe_maximum = GetOptionalIndexValue(
+      &thrower, context, descriptor, v8_str(isolate, "maximum"), initial,
+      max_supported_pages);
+  if (!maybe_maybe_maximum) {
     DCHECK(i_isolate->has_exception() || thrower.error());
     return;
   }
+  std::optional<uint32_t> maybe_maximum = *maybe_maybe_maximum;
 
-  // Parse the 'shared' property of the descriptor.
+  // Parse the 'shared' property of the `descriptor`.
   v8::Local<v8::Value> value;
   if (!descriptor->Get(context, v8_str(isolate, "shared")).ToLocal(&value)) {
     DCHECK(i_isolate->has_exception());
@@ -1544,14 +1554,18 @@ void WebAssemblyMemoryImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
                                              : i::SharedFlag::kNotShared;
 
   // Throw TypeError if shared is true, and the descriptor has no "maximum".
-  if (shared == i::SharedFlag::kShared && maximum == -1) {
+  if (shared == i::SharedFlag::kShared && !maybe_maximum.has_value()) {
     thrower.TypeError("If shared is true, maximum property should be defined.");
     return;
   }
 
   i::Handle<i::JSObject> memory_obj;
+  static_assert(i::wasm::kSpecMaxMemory32Pages < i::kMaxInt);
+  static_assert(i::wasm::kSpecMaxMemory64Pages < i::kMaxInt);
   if (!i::WasmMemoryObject::New(i_isolate, static_cast<int>(initial),
-                                static_cast<int>(maximum), shared, memory_flag)
+                                maybe_maximum ? static_cast<int>(*maybe_maximum)
+                                              : i::WasmMemoryObject::kNoMaximum,
+                                shared, index_type)
            .ToHandle(&memory_obj)) {
     thrower.RangeError("could not allocate memory");
     return;
@@ -1588,54 +1602,52 @@ void WebAssemblyMemoryImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
 // Returns false if there was an exception, true upon success. On success the
 // outgoing {type} is set accordingly, or set to {wasm::kWasmVoid} in case the
 // type could not be properly recognized.
-bool GetValueType(Isolate* isolate, MaybeLocal<Value> maybe,
-                  Local<Context> context, i::wasm::ValueType* type,
-                  WasmEnabledFeatures enabled_features) {
+std::optional<i::wasm::ValueType> GetValueType(
+    Isolate* isolate, MaybeLocal<Value> maybe, Local<Context> context,
+    WasmEnabledFeatures enabled_features) {
   v8::Local<v8::Value> value;
-  if (!maybe.ToLocal(&value)) return false;
+  if (!maybe.ToLocal(&value)) return std::nullopt;
   v8::Local<v8::String> string;
-  if (!value->ToString(context).ToLocal(&string)) return false;
+  if (!value->ToString(context).ToLocal(&string)) return std::nullopt;
   if (string->StringEquals(v8_str(isolate, "i32"))) {
-    *type = i::wasm::kWasmI32;
+    return i::wasm::kWasmI32;
   } else if (string->StringEquals(v8_str(isolate, "f32"))) {
-    *type = i::wasm::kWasmF32;
+    return i::wasm::kWasmF32;
   } else if (string->StringEquals(v8_str(isolate, "i64"))) {
-    *type = i::wasm::kWasmI64;
+    return i::wasm::kWasmI64;
   } else if (string->StringEquals(v8_str(isolate, "f64"))) {
-    *type = i::wasm::kWasmF64;
+    return i::wasm::kWasmF64;
   } else if (string->StringEquals(v8_str(isolate, "v128"))) {
-    *type = i::wasm::kWasmS128;
+    return i::wasm::kWasmS128;
   } else if (string->StringEquals(v8_str(isolate, "externref"))) {
-    *type = i::wasm::kWasmExternRef;
+    return i::wasm::kWasmExternRef;
   } else if (enabled_features.has_type_reflection() &&
              string->StringEquals(v8_str(isolate, "funcref"))) {
     // The type reflection proposal renames "anyfunc" to "funcref", and makes
     // "anyfunc" an alias of "funcref".
-    *type = i::wasm::kWasmFuncRef;
+    return i::wasm::kWasmFuncRef;
   } else if (string->StringEquals(v8_str(isolate, "anyfunc"))) {
     // The JS api spec uses 'anyfunc' instead of 'funcref'.
-    *type = i::wasm::kWasmFuncRef;
+    return i::wasm::kWasmFuncRef;
   } else if (string->StringEquals(v8_str(isolate, "eqref"))) {
-    *type = i::wasm::kWasmEqRef;
+    return i::wasm::kWasmEqRef;
   } else if (enabled_features.has_stringref() &&
              string->StringEquals(v8_str(isolate, "stringref"))) {
-    *type = i::wasm::kWasmStringRef;
+    return i::wasm::kWasmStringRef;
   } else if (string->StringEquals(v8_str(isolate, "anyref"))) {
-    *type = i::wasm::kWasmAnyRef;
+    return i::wasm::kWasmAnyRef;
   } else if (string->StringEquals(v8_str(isolate, "structref"))) {
-    *type = i::wasm::kWasmStructRef;
+    return i::wasm::kWasmStructRef;
   } else if (string->StringEquals(v8_str(isolate, "arrayref"))) {
-    *type = i::wasm::kWasmArrayRef;
+    return i::wasm::kWasmArrayRef;
   } else if (string->StringEquals(v8_str(isolate, "i31ref"))) {
-    *type = i::wasm::kWasmI31Ref;
+    return i::wasm::kWasmI31Ref;
   } else if (enabled_features.has_exnref() &&
              string->StringEquals(v8_str(isolate, "exnref"))) {
-    *type = i::wasm::kWasmExnRef;
-  } else {
-    // Unrecognized type.
-    *type = i::wasm::kWasmVoid;
+    return i::wasm::kWasmExnRef;
   }
-  return true;
+  // Unrecognized type.
+  return i::wasm::kWasmVoid;
 }
 
 namespace {
@@ -1719,7 +1731,10 @@ void WebAssemblyGlobalImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   {
     v8::MaybeLocal<v8::Value> maybe =
         descriptor->Get(context, v8_str(isolate, "value"));
-    if (!GetValueType(isolate, maybe, context, &type, enabled_features)) return;
+    std::optional<i::wasm::ValueType> maybe_type =
+        GetValueType(isolate, maybe, context, enabled_features);
+    if (!maybe_type) return;
+    type = *maybe_type;
     if (type == i::wasm::kWasmVoid) {
       thrower.TypeError(
           "Descriptor property 'value' must be a WebAssembly type");
@@ -1818,6 +1833,7 @@ void WebAssemblyGlobalImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
     case i::wasm::kI16:
     case i::wasm::kF16:
     case i::wasm::kVoid:
+    case i::wasm::kTop:
     case i::wasm::kBottom:
       UNREACHABLE();
   }
@@ -1889,8 +1905,11 @@ void WebAssemblyTagImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   for (uint32_t i = 0; i < parameters_len; ++i) {
     i::wasm::ValueType& type = param_types[i];
     MaybeLocal<Value> maybe = parameters->Get(context, i);
-    if (!GetValueType(isolate, maybe, context, &type, enabled_features) ||
-        type == i::wasm::kWasmVoid) {
+    std::optional<i::wasm::ValueType> maybe_type =
+        GetValueType(isolate, maybe, context, enabled_features);
+    if (!maybe_type) return;
+    type = *maybe_type;
+    if (type == i::wasm::kWasmVoid) {
       thrower.TypeError(
           "Argument 0 parameter type at index #%u must be a value type", i);
       return;
@@ -2005,6 +2024,7 @@ void EncodeExceptionValues(
       case i::wasm::kI16:
       case i::wasm::kF16:
       case i::wasm::kVoid:
+      case i::wasm::kTop:
       case i::wasm::kBottom:
       case i::wasm::kS128:
         UNREACHABLE();
@@ -2110,11 +2130,11 @@ i::Handle<i::JSFunction> NewPromisingWasmExportedFunction(
       i_isolate};
 
   int num_imported_functions = module->num_imported_functions;
-  i::DirectHandle<i::TrustedObject> ref;
+  i::DirectHandle<i::TrustedObject> implicit_arg;
   if (func_index >= num_imported_functions) {
-    ref = trusted_instance_data;
+    implicit_arg = trusted_instance_data;
   } else {
-    ref = i_isolate->factory()->NewWasmImportData(direct_handle(
+    implicit_arg = i_isolate->factory()->NewWasmImportData(direct_handle(
         i::Cast<i::WasmImportData>(
             trusted_instance_data->dispatch_table_for_imports()->implicit_arg(
                 func_index)),
@@ -2129,13 +2149,13 @@ i::Handle<i::JSFunction> NewPromisingWasmExportedFunction(
 #endif
 
   i::DirectHandle<i::WasmInternalFunction> internal =
-      i_isolate->factory()->NewWasmInternalFunction(ref, func_index,
+      i_isolate->factory()->NewWasmInternalFunction(implicit_arg, func_index,
                                                     signature_hash);
   i::DirectHandle<i::WasmFuncRef> func_ref =
       i_isolate->factory()->NewWasmFuncRef(internal, rtt);
   internal->set_call_target(trusted_instance_data->GetCallTarget(func_index));
   if (func_index < num_imported_functions) {
-    i::Cast<i::WasmImportData>(ref)->set_call_origin(*func_ref);
+    i::Cast<i::WasmImportData>(implicit_arg)->set_call_origin(*func_ref);
   }
 
   i::Handle<i::JSFunction> result = i::WasmExportedFunction::New(
@@ -2209,10 +2229,12 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& info) {
   i::Zone zone(i_isolate->allocator(), ZONE_NAME);
   i::wasm::FunctionSig::Builder builder(&zone, results_len, parameters_len);
   for (uint32_t i = 0; i < parameters_len; ++i) {
-    i::wasm::ValueType type;
     MaybeLocal<Value> maybe = parameters->Get(context, i);
-    if (!GetValueType(isolate, maybe, context, &type, enabled_features) ||
-        type == i::wasm::kWasmVoid) {
+    std::optional<i::wasm::ValueType> maybe_type =
+        GetValueType(isolate, maybe, context, enabled_features);
+    if (!maybe_type) return;
+    i::wasm::ValueType type = *maybe_type;
+    if (type == i::wasm::kWasmVoid) {
       thrower.TypeError(
           "Argument 0 parameter type at index #%u must be a value type", i);
       return;
@@ -2220,9 +2242,11 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& info) {
     builder.AddParam(type);
   }
   for (uint32_t i = 0; i < results_len; ++i) {
-    i::wasm::ValueType type;
     MaybeLocal<Value> maybe = results->Get(context, i);
-    if (!GetValueType(isolate, maybe, context, &type, enabled_features)) return;
+    std::optional<i::wasm::ValueType> maybe_type =
+        GetValueType(isolate, maybe, context, enabled_features);
+    if (!maybe_type) return;
+    i::wasm::ValueType type = *maybe_type;
     if (type == i::wasm::kWasmVoid) {
       thrower.TypeError(
           "Argument 0 result type at index #%u must be a value type", i);
@@ -2235,7 +2259,7 @@ void WebAssemblyFunction(const v8::FunctionCallbackInfo<v8::Value>& info) {
     thrower.TypeError("Argument 1 must be a function");
     return;
   }
-  const i::wasm::FunctionSig* sig = builder.Build();
+  const i::wasm::FunctionSig* sig = builder.Get();
   i::wasm::Suspend suspend = i::wasm::kNoSuspend;
 
   i::Handle<i::JSReceiver> callable = Utils::OpenHandle(*info[1].As<Object>());
@@ -2308,6 +2332,12 @@ void WebAssemblySuspendingImpl(
   i::DirectHandle<i::JSReceiver> callable =
       Utils::OpenDirectHandle(*info[0].As<Function>());
 
+  if (i::WasmExportedFunction::IsWasmExportedFunction(*callable) ||
+      i::WasmJSFunction::IsWasmJSFunction(*callable)) {
+    thrower.TypeError("Argument 0 must not be a WebAssembly function");
+    return;
+  }
+
   i::Handle<i::WasmSuspendingObject> result =
       i::WasmSuspendingObject::New(i_isolate, callable);
   info.GetReturnValue().Set(Utils::ToLocal(i::Cast<i::JSObject>(result)));
@@ -2342,7 +2372,7 @@ void WebAssemblyFunctionType(const v8::FunctionCallbackInfo<v8::Value>& info) {
         builder.AddParam(sig->GetParam(i));
       }
       builder.AddReturn(i::wasm::kWasmExternRef);
-      sig = builder.Build();
+      sig = builder.Get();
     }
   } else if (i::WasmJSFunction::IsWasmJSFunction(*fun)) {
     sig = i::Cast<i::WasmJSFunction>(fun)
@@ -2410,10 +2440,10 @@ void WebAssemblyTableGrowImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   Local<Context> context = isolate->GetCurrentContext();
   EXTRACT_THIS(receiver, WasmTableObject);
 
-  uint32_t grow_by;
-  if (!EnforceUint32("Argument 0", info[0], context, &thrower, &grow_by)) {
-    return;
-  }
+  std::optional<uint32_t> maybe_grow_by =
+      EnforceUint32("Argument 0", info[0], context, &thrower);
+  if (!maybe_grow_by) return;
+  uint32_t grow_by = *maybe_grow_by;
 
   i::Handle<i::Object> init_value;
 
@@ -2481,10 +2511,11 @@ void WebAssemblyTableGetImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   Local<Context> context = isolate->GetCurrentContext();
   EXTRACT_THIS(receiver, WasmTableObject);
 
-  uint32_t index;
-  if (!EnforceUint32("Argument 0", info[0], context, &thrower, &index)) {
-    return;
-  }
+  std::optional<uint32_t> maybe_index =
+      EnforceUint32("Argument 0", info[0], context, &thrower);
+  if (!maybe_index) return;
+  uint32_t index = *maybe_index;
+
   if (!receiver->is_in_bounds(index)) {
     thrower.RangeError("invalid index %u into %s table of size %d", index,
                        receiver->type().name().c_str(),
@@ -2511,10 +2542,11 @@ void WebAssemblyTableSetImpl(const v8::FunctionCallbackInfo<v8::Value>& info) {
   EXTRACT_THIS(table_object, WasmTableObject);
 
   // Parameter 0.
-  uint32_t index;
-  if (!EnforceUint32("Argument 0", info[0], context, &thrower, &index)) {
-    return;
-  }
+  std::optional<uint32_t> maybe_index =
+      EnforceUint32("Argument 0", info[0], context, &thrower);
+  if (!maybe_index) return;
+  uint32_t index = *maybe_index;
+
   if (!table_object->is_in_bounds(index)) {
     thrower.RangeError("invalid index %u into %s table of size %d", index,
                        table_object->type().name().c_str(),
@@ -2575,10 +2607,10 @@ void WebAssemblyMemoryGrowImpl(
   Local<Context> context = isolate->GetCurrentContext();
   EXTRACT_THIS(receiver, WasmMemoryObject);
 
-  uint32_t delta_pages;
-  if (!EnforceUint32("Argument 0", info[0], context, &thrower, &delta_pages)) {
-    return;
-  }
+  std::optional<uint32_t> maybe_delta_pages =
+      EnforceUint32("Argument 0", info[0], context, &thrower);
+  if (!maybe_delta_pages) return;
+  uint32_t delta_pages = *maybe_delta_pages;
 
   i::DirectHandle<i::JSArrayBuffer> old_buffer(receiver->array_buffer(),
                                                i_isolate);
@@ -2692,10 +2724,10 @@ void WebAssemblyExceptionGetArgImpl(
   if (thrower.error()) return;
   auto tag = maybe_tag.ToHandleChecked();
   Local<Context> context = isolate->GetCurrentContext();
-  uint32_t index;
-  if (!EnforceUint32("Index", info[1], context, &thrower, &index)) {
-    return;
-  }
+  std::optional<uint32_t> maybe_index =
+      EnforceUint32("Index", info[1], context, &thrower);
+  if (!maybe_index) return;
+  uint32_t index = *maybe_index;
   auto maybe_values =
       i::WasmExceptionPackage::GetExceptionValues(i_isolate, exception);
 
@@ -2736,6 +2768,7 @@ void WebAssemblyExceptionGetArgImpl(
       case i::wasm::kI16:
       case i::wasm::kF16:
       case i::wasm::kVoid:
+      case i::wasm::kTop:
       case i::wasm::kBottom:
       case i::wasm::kS128:
         UNREACHABLE();
@@ -2784,6 +2817,7 @@ void WebAssemblyExceptionGetArgImpl(
     case i::wasm::kI16:
     case i::wasm::kF16:
     case i::wasm::kVoid:
+    case i::wasm::kTop:
     case i::wasm::kBottom:
     case i::wasm::kS128:
       UNREACHABLE();
@@ -2852,6 +2886,7 @@ void WebAssemblyGlobalGetValueCommon(
     case i::wasm::kI8:
     case i::wasm::kI16:
     case i::wasm::kF16:
+    case i::wasm::kTop:
     case i::wasm::kBottom:
     case i::wasm::kVoid:
       UNREACHABLE();
@@ -2941,6 +2976,7 @@ void WebAssemblyGlobalSetValueImpl(
     case i::wasm::kI8:
     case i::wasm::kI16:
     case i::wasm::kF16:
+    case i::wasm::kTop:
     case i::wasm::kBottom:
     case i::wasm::kVoid:
       UNREACHABLE();
@@ -3148,7 +3184,7 @@ void WasmJs::PrepareForSnapshot(Isolate* isolate) {
     Handle<String> WebAssembly_string = v8_str(isolate, "WebAssembly");
     // Not supposed to be called, hence using the kIllegal builtin as code.
     Handle<SharedFunctionInfo> sfi = f->NewSharedFunctionInfoForBuiltin(
-        WebAssembly_string, Builtin::kIllegal);
+        WebAssembly_string, Builtin::kIllegal, 0, kDontAdapt);
     sfi->set_language_mode(LanguageMode::kStrict);
 
     Handle<JSFunction> ctor =
@@ -3572,7 +3608,8 @@ bool WasmJs::InstallTypeReflection(Isolate* isolate,
 
   InstallFunc(isolate, function_proto, type_string, WebAssemblyFunctionType, 0);
   SimpleInstallFunction(isolate, function_proto, "bind",
-                        Builtin::kWebAssemblyFunctionPrototypeBind, 1, false);
+                        Builtin::kWebAssemblyFunctionPrototypeBind, 1,
+                        kDontAdapt);
   // Make all exported functions an instance of {WebAssembly.Function}.
   context->set_wasm_exported_function_map(*function_map);
   return true;
